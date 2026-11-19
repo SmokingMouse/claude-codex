@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import {
   type AppPluginServer,
   appPluginRequest,
@@ -482,6 +482,16 @@ async function connectMcp(
   return connectStdio(serverName, config, cwd)
 }
 
+// The thread's folder when it is a folder; otherwise the server starts where
+// the adapter runs, as before.
+function serverCwd(cwd: string | null | undefined): string | undefined {
+  try {
+    return cwd && statSync(cwd).isDirectory() ? cwd : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function connectStdio(
   serverName: string,
   config: Record<string, unknown>,
@@ -490,7 +500,7 @@ async function connectStdio(
   const command = stringOr(config.command, '')
   if (!command) throw new Error(`MCP server ${serverName} has no command`)
   const child = spawn(command, Array.isArray(config.args) ? config.args.map(String) : [], {
-    cwd: typeof cwd === 'string' && existsSync(cwd) ? cwd : undefined,
+    cwd: serverCwd(cwd),
     env: { ...process.env, ...stringRecord(config.env) },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
