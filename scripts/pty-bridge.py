@@ -62,9 +62,15 @@ def main():
         sys.exit(1)
     cmd = sys.argv[1:]
     master, slave = pty.openpty()
+    # The child waits until we have closed our copy of the slave: if a fast child exited first,
+    # our close would be the last one, and macOS then drops the output nobody has read yet.
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(master)
+        os.close(ready_w)
+        os.read(ready_r, 1)
+        os.close(ready_r)
         os.setsid()
         os.dup2(slave, 0)
         os.dup2(slave, 1)
@@ -75,6 +81,8 @@ def main():
         except Exception:
             sys.exit(127)
     os.close(slave)
+    os.close(ready_r)
+    os.close(ready_w)
 
     def pty_reader():
         try:
