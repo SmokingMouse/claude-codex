@@ -1158,11 +1158,12 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
           if (questions.length === 0) {
             return { behavior: 'deny', message: 'no questions provided' }
           }
-          if (typeof pending.handlers.onUserInputRequest !== 'function') {
+          const ask = pending.handlers.onUserInputRequest
+          if (typeof ask !== 'function') {
             return { behavior: 'deny', message: 'user input not available in this runtime' }
           }
           const answers = await untilToolCancelled(options.signal, () =>
-            pending.handlers.onUserInputRequest!(
+            ask(
               {
                 type: 'user_input_request',
                 requestId,

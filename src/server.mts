@@ -6129,12 +6129,13 @@ export class CodexClaudeAppServer {
             this.requestUserInput(peer, thread.id, turn.id, item.id, event.questions, signal),
           )
           if (!turnIsActive()) return { answers: {} }
+          const withdrawn = signal?.aborted === true
           const contentItems = userInputAnswersAsContent(event.questions, answers)
           const completedItem: ThreadItem = {
             ...item,
-            status: 'completed',
-            success: true,
-            contentItems,
+            status: withdrawn ? 'failed' : 'completed',
+            success: !withdrawn,
+            contentItems: withdrawn ? [] : contentItems,
             durationMs: Math.max(0, nowMillis() - startedAt),
           }
           this.store.updateItem(turn.id, item.id, () => completedItem)
@@ -7811,7 +7812,7 @@ export class CodexClaudeAppServer {
 
     let response: unknown
     try {
-      response = await this.sendServerRequest(peer, method, requestId, params, signal)
+      response = await this.sendServerRequest(peer, method, requestId, params, signal, false)
     } catch (error) {
       if (signal?.aborted) return { decision: 'decline' }
       throw error
@@ -7887,6 +7888,7 @@ export class CodexClaudeAppServer {
         },
         'waitingOnApproval',
         signal,
+        false,
       )
     } catch {
       // The App could not answer: refuse this call and let Claude go on.
@@ -7939,6 +7941,7 @@ export class CodexClaudeAppServer {
         requestId,
         params,
         signal,
+        false,
       )
     } catch (error) {
       if (signal?.aborted) return { answers: {} }
@@ -8042,6 +8045,7 @@ export class CodexClaudeAppServer {
     params: Record<string, unknown>,
     flag: 'waitingOnApproval' | 'waitingOnUserInput',
     signal?: AbortSignal,
+    cancellable = signal != null,
   ): Promise<Record<string, unknown>> {
     this.setThreadStatus(peer, threadId, { type: 'active', activeFlags: [flag] })
     try {
@@ -8052,6 +8056,7 @@ export class CodexClaudeAppServer {
           requestId,
           params,
           signal,
+          cancellable,
         ),
       )
     } finally {
@@ -9938,6 +9943,7 @@ export class CodexClaudeAppServer {
     id: string,
     params: unknown,
     signal?: AbortSignal,
+    cancellable = signal != null,
   ): Promise<unknown> {
     const targets = this.targetsForParams(peer, params)
     return new Promise((resolve, reject) => {
@@ -9964,7 +9970,7 @@ export class CodexClaudeAppServer {
         turnId: nullIfEmpty(stringOr(fields.turnId, '')),
         request,
         targets: new Set(targets.map((target) => target.id)),
-        cancellable: signal != null,
+        cancellable,
         resolve: (value) => {
           signal?.removeEventListener('abort', onAbort)
           resolve(value)
@@ -10017,7 +10023,7 @@ export class CodexClaudeAppServer {
   // A turn's approvals and questions end with it, as Codex's app-server drops
   // a thread's pending requests when its turn completes: an answer that comes
   // later is ignored instead of reporting the idle thread active again.
-  // Requests with an abort signal are withdrawn through it.
+  // Requests registered as cancellable are withdrawn through their signal instead.
   private dropPendingServerRequests(threadId: string, turnId: string): void {
     for (const [id, pending] of this.pendingServerRequests.entries()) {
       if (pending.cancellable || pending.threadId !== threadId || pending.turnId !== turnId)

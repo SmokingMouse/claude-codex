@@ -1,7 +1,57 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { PermissionDecision, UserInputAnswers } from '../src/types.mjs'
+import type { PermissionDecision, RuntimeHandlers, UserInputAnswers } from '../src/types.mjs'
 import { scriptedRuntime, withInProcessApp } from './fixtures/in-process-app.mjs'
+
+type CardKind = 'command' | 'question' | 'mcp'
+
+// Opens the kind's card the way native-runtime does, with can_use_tool's signal.
+function askThroughCard(
+  kind: CardKind,
+  handlers: RuntimeHandlers,
+  signal: AbortSignal,
+): Promise<PermissionDecision | UserInputAnswers> {
+  if (kind === 'question') {
+    assert.ok(handlers.onUserInputRequest)
+    return handlers.onUserInputRequest(
+      {
+        type: 'user_input_request',
+        requestId: 'cancel-question',
+        toolUseId: 'question',
+        questions: [
+          {
+            id: 'choice',
+            header: 'Choice',
+            question: 'Continue?',
+            isOther: true,
+            isSecret: false,
+            options: [{ label: 'Yes', description: 'Continue the work' }],
+          },
+        ],
+      },
+      signal,
+    )
+  }
+  return handlers.onPermissionRequest(
+    {
+      type: 'permission_request',
+      requestId: 'cancel-permission',
+      requiresUser: true,
+      toolUseId: 'permission',
+      toolName: kind === 'mcp' ? 'mcp__fixture__write' : 'Bash',
+      input: kind === 'mcp' ? { text: 'hello' } : { command: 'echo hello' },
+    },
+    signal,
+  )
+}
+
+function cardMethod(kind: CardKind): string {
+  return kind === 'question'
+    ? 'item/tool/requestUserInput'
+    : kind === 'mcp'
+      ? 'mcpServer/elicitation/request'
+      : 'item/commandExecution/requestApproval'
+}
 
 for (const kind of ['command', 'question', 'mcp'] as const) {
   test(`cancelled ${kind} request withdraws its card without interrupting the turn`, async () => {
@@ -14,39 +64,7 @@ for (const kind of ['command', 'question', 'mcp'] as const) {
     let interrupts = 0
     const runtime = scriptedRuntime(
       async (_context, handlers) => {
-        if (kind === 'question') {
-          assert.ok(handlers.onUserInputRequest)
-          outcome = await handlers.onUserInputRequest(
-            {
-              type: 'user_input_request',
-              requestId: 'cancel-question',
-              toolUseId: 'question',
-              questions: [
-                {
-                  id: 'choice',
-                  header: 'Choice',
-                  question: 'Continue?',
-                  isOther: true,
-                  isSecret: false,
-                  options: [{ label: 'Yes', description: 'Continue the work' }],
-                },
-              ],
-            },
-            controller.signal,
-          )
-        } else {
-          outcome = await handlers.onPermissionRequest(
-            {
-              type: 'permission_request',
-              requestId: 'cancel-permission',
-              requiresUser: true,
-              toolUseId: 'permission',
-              toolName: kind === 'mcp' ? 'mcp__fixture__write' : 'Bash',
-              input: kind === 'mcp' ? { text: 'hello' } : { command: 'echo hello' },
-            },
-            controller.signal,
-          )
-        }
+        outcome = await askThroughCard(kind, handlers, controller.signal)
         await continued
         await handlers.onEvent({ type: 'text_delta', delta: 'The turn is still healthy.' })
         await handlers.onEvent({ type: 'completed', success: true })
@@ -60,12 +78,7 @@ for (const kind of ['command', 'question', 'mcp'] as const) {
     await withInProcessApp(runtime, async (app) => {
       const threadId = await app.startThread({ approvalPolicy: 'untrusted', model: 'sonnet' })
       const turnId = await app.startTurn(threadId, 'Ask before running the tool')
-      const method =
-        kind === 'question'
-          ? 'item/tool/requestUserInput'
-          : kind === 'mcp'
-            ? 'mcpServer/elicitation/request'
-            : 'item/commandExecution/requestApproval'
+      const method = cardMethod(kind)
       try {
         const request = await app.waitFor(() =>
           app.messages.find((message) => message.method === method),
@@ -95,9 +108,59 @@ for (const kind of ['command', 'question', 'mcp'] as const) {
             .filter((message) => message.requestId === request.id).length,
           1,
         )
+        if (kind === 'question') {
+          // A question Claude Code withdrew is not shown as answered.
+          const asked = app
+            .notified('item/completed')
+            .find((message) => message.item.tool === 'AskUserQuestion')
+          assert.equal(asked?.item.status, 'failed')
+          assert.equal(asked?.item.success, false)
+        }
       } finally {
         controller.abort()
         resumeTurn()
+      }
+    })
+  })
+
+  test(`interrupting a turn with an open ${kind} card leaves the thread idle and ignores a late answer`, async () => {
+    const controller = new AbortController()
+    let resumeTurn: () => void = () => {}
+    const continued = new Promise<void>((resolve) => {
+      resumeTurn = resolve
+    })
+    const runtime = scriptedRuntime(
+      async (_context, handlers) => {
+        await askThroughCard(kind, handlers, controller.signal)
+        await continued
+        await handlers.onEvent({ type: 'text_delta', delta: 'The turn is still healthy.' })
+        await handlers.onEvent({ type: 'completed', success: true })
+      },
+      // The SDK aborts every pending can_use_tool call when the query closes.
+      { interrupt: async () => controller.abort() },
+    )
+    await withInProcessApp(runtime, async (app) => {
+      const threadId = await app.startThread({ approvalPolicy: 'untrusted', model: 'sonnet' })
+      const turnId = await app.startTurn(threadId, 'Ask before running the tool')
+      const method = cardMethod(kind)
+      try {
+        const request = await app.waitFor(() =>
+          app.messages.find((message) => message.method === method),
+        )
+        await app.request('turn/interrupt', { threadId, turnId })
+        assert.equal((await app.turnCompleted(turnId)).status, 'interrupted')
+        await app.respond(
+          request.id,
+          kind === 'mcp' ? { action: 'accept', content: {} } : { decision: 'accept' },
+        )
+        await new Promise((resolve) => setImmediate(resolve))
+        const statuses = app
+          .notified('thread/status/changed')
+          .filter((message) => message.threadId === threadId)
+        assert.equal(statuses.at(-1)?.status.type, 'idle')
+      } finally {
+        resumeTurn()
+        controller.abort()
       }
     })
   })
