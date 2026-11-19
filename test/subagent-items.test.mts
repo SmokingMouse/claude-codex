@@ -1839,7 +1839,7 @@ test('the mock runtime shows its subagent items check, unless they are off', asy
 
 test('parent and subagent Bash items preserve failure exit codes and ignore status text on success', async () => {
   const cases = [
-    { content: 'nosuchcmd: command not found\nExit code 127', isError: true, code: 127 },
+    { content: 'Exit code 127\nnosuchcmd: command not found', isError: true, code: 127 },
     { content: [{ type: 'text', text: 'missing file\nExit code: 2' }], isError: true, code: 2 },
     { content: 'failed without an exit trailer', isError: true, code: 1 },
     { content: 'quoted log\nexit status: 101', isError: false, code: 0 },
