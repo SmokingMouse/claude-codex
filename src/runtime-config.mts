@@ -73,9 +73,21 @@ export function resolveRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runt
   }
 }
 
+// The codex shim's native passthrough values: with one of them the shim runs
+// the real Codex app-server and never starts the adapter.
+const SHIM_NATIVE_CODEX_ROUTES = new Set(['codex', 'native-codex', 'real-codex', 'native', 'real'])
+
 export function normalizeRuntimeType(value: string | undefined): RuntimeBackendType | null {
   const raw = (value ?? '').trim().toLowerCase()
   if (!raw) return null
+  // Still refused, never a silent fallback, but saying why.
+  if (SHIM_NATIVE_CODEX_ROUTES.has(raw)) {
+    throw new Error(
+      `CLAUDE_CODEX_RUNTIME_TYPE=${value} is the codex shim's native Codex passthrough: ` +
+        'the shim runs the real codex app-server and the adapter does not start. Unset it, ' +
+        'or choose an adapter route such as agent-sdk-sidecar, to run the adapter directly.',
+    )
+  }
   switch (raw) {
     case 'mock':
       return 'mock'
@@ -130,7 +142,7 @@ function numericEnv(value: string | undefined, fallback: number, min: number, ma
 }
 
 function stringList(value: string | undefined): string[] {
-  if (!value || !value.trim()) return []
+  if (!value?.trim()) return []
   const raw = value.trim()
   try {
     const parsed = JSON.parse(raw)

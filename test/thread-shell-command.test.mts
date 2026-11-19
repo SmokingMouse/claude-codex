@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import test from 'node:test'
+import { SessionStore } from '../src/store.mjs'
 import { scriptedRuntime, withInProcessApp } from './fixtures/in-process-app.mjs'
 
 test('thread shell commands emit a standalone turn and item lifecycle but hide the item in history', async () => {
@@ -11,6 +14,7 @@ test('thread shell commands emit a standalone turn and item lifecycle but hide t
         await app.request('thread/shellCommand', {
           threadId,
           command: 'printf shell-output; printf shell-error >&2; exit 3',
+          timeoutMs: null,
         }),
         {},
       )
@@ -20,6 +24,7 @@ test('thread shell commands emit a standalone turn and item lifecycle but hide t
       const item = completed.item
       assert.equal(completed.threadId, threadId)
       assert.equal(item.type, 'commandExecution')
+      assert.equal(item.processId, null)
       assert.equal(item.exitCode, 3)
       assert.equal(item.status, 'failed')
       assert.equal(item.cwd, app.home)
@@ -60,6 +65,15 @@ test('thread shell commands emit a standalone turn and item lifecycle but hide t
       const listed = await app.request('thread/turns/list', { threadId, itemsView: 'full' })
       assert.equal(listed.data.length, 1)
       assert.deepEqual(listed.data[0].items, [])
+      const items = await app.request('thread/items/list', { threadId, turnId: completed.turnId })
+      assert.deepEqual(items.data, [])
+      const timeline = await app.request('thread/timeline/list', { threadId })
+      assert.deepEqual(
+        timeline.data.map((entry: { type: string }) => entry.type),
+        ['turnStarted', 'turnCompleted'],
+      )
+      const fork = await app.request('thread/fork', { threadId })
+      assert.deepEqual(fork.thread.turns[0].items, [])
     },
   )
 })
@@ -69,11 +83,24 @@ test('thread shell command timeout reports exit code -1 and settles its turn', a
     scriptedRuntime(async () => {}),
     async (app) => {
       const threadId = await app.startThread({ cwd: app.home })
-      await app.request('thread/shellCommand', { threadId, command: 'sleep 30', timeoutMs: 100 })
+      await app.request('thread/shellCommand', {
+        threadId,
+        command: 'printf partial-output; exec sleep 30',
+        timeoutMs: 1200,
+      })
       const completed = await app.waitFor(() =>
         app.notified('item/completed').find((event) => event.item.source === 'userShell'),
       )
       assert.equal(completed.item.exitCode, -1)
+      assert.match(completed.item.aggregatedOutput, /partial-output[\s\S]*Timeout/)
+      assert.match(
+        app
+          .notified('item/commandExecution/outputDelta')
+          .map((p) => p.delta)
+          .join(''),
+        /Timeout/,
+      )
+
       assert.equal(completed.item.status, 'failed')
       assert.equal((await app.turnCompleted(completed.turnId)).status, 'completed')
     },
@@ -85,18 +112,22 @@ test('thread shell command rejects unknown threads and invalid timeout before ex
     scriptedRuntime(async () => {}),
     async (app) => {
       const threadId = await app.startThread({ cwd: app.home })
-      for (const timeoutMs of [-1, '100', null, Number.NaN, Number.POSITIVE_INFINITY]) {
+      for (const timeoutMs of [-1, 1.5, '100', 2 ** 64, Number.NaN, Number.POSITIVE_INFINITY]) {
         const reply = await app.call('thread/shellCommand', {
           threadId,
-          command: 'printf should-not-run',
+          command: 'printf ignored',
           timeoutMs,
         })
         assert.equal(reply.error?.code, -32602)
-        assert.match(reply.error?.message ?? '', /timeoutMs must be non-negative/)
+        assert.match(reply.error?.message ?? '', /timeoutMs/)
+      }
+      for (const command of ['  ', 'word\0word']) {
+        const reply = await app.call('thread/shellCommand', { threadId, command })
+        assert.equal(reply.error?.code, -32602)
       }
       const unknown = await app.call('thread/shellCommand', {
         threadId: 'missing-thread',
-        command: 'printf should-not-run',
+        command: 'printf ignored',
       })
       assert.match(unknown.error?.message ?? '', /unknown thread: missing-thread/)
       assert.equal(app.notified('turn/started').length, 0)
@@ -140,13 +171,20 @@ test('server shutdown stops an active user shell and releases its idle hold', as
     scriptedRuntime(async () => {}),
     async (app) => {
       const threadId = await app.startThread({ cwd: app.home })
-      await app.request('thread/shellCommand', { threadId, command: 'sleep 30' })
+      await app.request('thread/shellCommand', {
+        threadId,
+        command: 'printf "%s" "$$"; exec sleep 30',
+      })
       const started = await app.waitFor(() =>
         app.notified('item/started').find((event) => event.item.source === 'userShell'),
       )
-      const processes = Reflect.get(app.server, 'commandProcesses') as Map<string, { pid?: number }>
-      const pid = processes.get(started.item.processId)?.pid
-      assert.ok(pid, 'shell must have spawned before shutdown')
+      const pid = await app.waitFor(() => {
+        const output = app
+          .notified('item/commandExecution/outputDelta')
+          .map((p) => p.delta)
+          .join('')
+        return Number(output) > 0 ? Number(output) : undefined
+      })
       assert.equal(app.server.hasActiveTurns(), true)
       await app.server.stop()
       assert.equal(app.server.hasActiveTurns(), false)
@@ -159,7 +197,176 @@ test('server shutdown stops an active user shell and releases its idle hold', as
           throw error
         }
       })
-      await app.waitFor(() => (processes.size === 0 ? true : undefined))
+      const reopened = new SessionStore(join(app.home, 'state.sqlite'))
+      try {
+        const turn = reopened.getTurn(started.turnId)
+        assert.equal(turn?.status, 'interrupted')
+        const item = turn?.items.find((item) => item.type === 'commandExecution')
+        assert.equal(item?.status, 'failed')
+        assert.equal(item?.exitCode, -1)
+      } finally {
+        reopened.close()
+      }
     },
   )
 })
+
+test('shell input is closed and large output is bounded on the wire and in the store', async () => {
+  await withInProcessApp(
+    scriptedRuntime(async () => {}),
+    async (app) => {
+      await writeFile(join(app.home, 'fixture.txt'), 'large 文本🌍\n'.repeat(90_000))
+      const threadId = await app.startThread({ cwd: app.home })
+      await app.request('thread/shellCommand', {
+        threadId,
+        command: 'cat; cat fixture.txt; exit 7',
+        timeoutMs: 10_000,
+      })
+      const completed = await app.waitFor(() =>
+        app.notified('item/completed').find((p) => p.item.source === 'userShell'),
+      )
+      assert.equal(completed.item.exitCode, 7)
+      const output = completed.item.aggregatedOutput
+      assert.ok(Buffer.byteLength(output) <= 1_000_000 && Buffer.byteLength(output) > 990_000)
+      assert.ok(!output.includes('�'))
+      assert.equal(
+        app
+          .notified('item/commandExecution/outputDelta')
+          .map((p) => p.delta)
+          .join(''),
+        output,
+      )
+      const stored = app.store
+        .getTurn(completed.turnId)
+        ?.items.find((item) => item.type === 'commandExecution')
+      assert.equal(stored?.aggregatedOutput, output)
+    },
+  )
+})
+
+for (const joined of [false, true]) {
+  test(`interrupt closes the ${joined ? 'joined' : 'standalone'} shell before completing the turn once`, async () => {
+    let finishRuntime = () => {}
+    const running = new Promise<void>((resolve) => {
+      finishRuntime = resolve
+    })
+    const runtime = scriptedRuntime(
+      async (_ctx, handlers) => {
+        await running
+        await handlers.onEvent({ type: 'completed', success: true })
+      },
+      { interrupt: async () => finishRuntime() },
+    )
+    await withInProcessApp(runtime, async (app) => {
+      try {
+        const threadId = await app.startThread({ cwd: app.home })
+        const active = joined ? await app.startTurn(threadId, 'Wait for interrupt') : null
+        await app.request('thread/shellCommand', {
+          threadId,
+          command: 'printf "%s" "$$"; exec sleep 30',
+        })
+        const pid = await app.waitFor(
+          () =>
+            Number(app.notified('item/commandExecution/outputDelta').at(-1)?.delta) || undefined,
+        )
+        const started = app.notified('item/started').find((p) => p.item.source === 'userShell')
+        if (active) assert.equal(started.turnId, active)
+        else {
+          const competing = await app.call('turn/start', {
+            threadId,
+            input: [{ type: 'text', text: 'new turn' }],
+          })
+          assert.ok(competing.error)
+          assert.equal(app.notified('turn/started').length, 1)
+        }
+        await app.request('turn/interrupt', { threadId, turnId: started.turnId })
+        assert.equal((await app.turnCompleted(started.turnId)).status, 'interrupted')
+        const completed = app.notified('item/completed').find((p) => p.item.source === 'userShell')
+        assert.equal(completed.item.exitCode, -1)
+        assert.match(completed.item.aggregatedOutput, /command aborted by user/)
+        const itemEnd = app.messages.findIndex(
+          (m) => m.method === 'item/completed' && m.params.item.id === started.item.id,
+        )
+        const turnEnd = app.messages.findIndex(
+          (m) => m.method === 'turn/completed' && m.params.turn.id === started.turnId,
+        )
+        assert.ok(itemEnd >= 0 && itemEnd < turnEnd)
+        await app.waitFor(() => {
+          try {
+            process.kill(pid, 0)
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+            throw error
+          }
+          return undefined
+        })
+        assert.equal(app.store.getTurn(started.turnId)?.status, 'interrupted')
+        assert.equal(
+          app.notified('turn/completed').filter((p) => p.turn.id === started.turnId).length,
+          1,
+        )
+      } finally {
+        finishRuntime()
+      }
+    })
+  })
+}
+
+test('ending a runtime turn waits for a joined command before sending turn/completed', async () => {
+  let finishRuntime = () => {}
+  const running = new Promise<void>((resolve) => {
+    finishRuntime = resolve
+  })
+  const runtime = scriptedRuntime(async (_ctx, handlers) => {
+    await running
+    await handlers.onEvent({ type: 'completed', success: true })
+  })
+  await withInProcessApp(runtime, async (app) => {
+    try {
+      const threadId = await app.startThread({ cwd: app.home })
+      const turnId = await app.startTurn(threadId, 'wait for shell')
+      await app.request('thread/shellCommand', {
+        threadId,
+        command: 'printf ready; while [ ! -f proceed ]; do sleep 0.05; done; printf done',
+      })
+      await app.waitFor(() =>
+        app.notified('item/commandExecution/outputDelta').find((p) => p.delta.includes('ready')),
+      )
+      finishRuntime()
+      await writeFile(join(app.home, 'proceed'), '')
+      await app.turnCompleted(turnId)
+      const end = app.messages.findIndex(
+        (m) => m.method === 'item/completed' && m.params.item.source === 'userShell',
+      )
+      const turnEnd = app.messages.findIndex(
+        (m) => m.method === 'turn/completed' && m.params.turn.id === turnId,
+      )
+      assert.ok(end >= 0 && end < turnEnd)
+      assert.equal(app.messages[end].params.item.aggregatedOutput, 'readydone')
+    } finally {
+      finishRuntime()
+    }
+  })
+})
+
+for (const method of ['thread/archive', 'thread/delete']) {
+  test(`${method} aborts a running shell before removing its thread`, async () => {
+    await withInProcessApp(
+      scriptedRuntime(async () => {}),
+      async (app) => {
+        const threadId = await app.startThread({ cwd: app.home })
+        await app.request('thread/shellCommand', { threadId, command: 'exec sleep 30' })
+        const start = app.notified('item/started').find((p) => p.item.source === 'userShell')
+        await app.request(method, { threadId })
+        assert.equal((await app.turnCompleted(start.turnId)).status, 'interrupted')
+        const item = app.notified('item/completed').find((p) => p.item.id === start.item.id)
+        assert.equal(item.item.exitCode, -1)
+        assert.equal(app.server.hasActiveTurns(), false)
+        if (method === 'thread/archive') {
+          assert.equal(app.store.getThread(threadId)?.archived, true)
+          assert.equal(app.store.getTurn(start.turnId)?.status, 'interrupted')
+        } else assert.equal(app.store.getThread(threadId), null)
+      },
+    )
+  })
+}

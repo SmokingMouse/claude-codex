@@ -5,11 +5,19 @@ recurring Codex maintenance loops. The workflow is deliberately explicit: tasks
 are queued in a local state file, leased by a worker, verified, and then marked
 complete.
 
-The default state file is:
+The default state file is `workflow-state.json` in the adapter home
+(`CLAUDE_CODEX_HOME`, else `claude-codex-adapter` under `CODEX_HOME`, which
+defaults to `~/.codex`; see the
+[configuration reference](/guide/configuration#reference-table)):
 
 ```text
 ~/.codex/claude-codex-adapter/workflow-state.json
 ```
+
+Every command takes `--state PATH` to name another state file, `health` also
+takes `--run-log PATH` for the run registry, and each command prints the
+`statePath` it used. Check `statePath` when the daemon runs with a different
+`CODEX_HOME` or `CLAUDE_CODEX_HOME` than the shell you run the CLI from.
 
 ## Core loop
 
@@ -58,17 +66,19 @@ npm run workflow -- block --task task-id --reason "Needs a missing credential"
 | --- | --- |
 | `counts` | Number of queued, running, blocked, done, and failed tasks. |
 | `runningTaskIds` | Tasks currently holding leases. |
-| `staleLeaseTaskIds` | Running tasks whose lease expired and can be reclaimed. |
+| `staleLeaseTaskIds` | Running tasks whose lease expired; `schedule` reclaims them, or fails them on their final attempt. |
 | `nextLeaseExpiresAt` | The next active lease expiry time, or `null`. |
 | `runRegistryLagMs` | Time since the run registry was last updated, when available. |
 
 A safe heartbeat has no stale leases, no failed tasks, and no duplicate queued
-work. A stale lease can be reclaimed by `schedule`; an active lease should not
-be stolen.
+work. `schedule` reclaims a stale lease. If that lease was the task's final
+attempt (`attempts >= maxAttempts`), `schedule` marks the task `failed` with a
+lease-expiry `lastError` instead, and a late `complete` or `fail` from that
+worker is rejected. An active lease should not be stolen.
 
 ## Run registry
 
-Run events are appended to:
+Run events are appended to `runs.jsonl` in the adapter home, by default:
 
 ```text
 ~/.codex/claude-codex-adapter/runs.jsonl
@@ -83,13 +93,20 @@ on it for raw prompt, response, credential, or user-secret recovery.
 
 ## Worktree isolation
 
-Set `CLAUDE_CODEX_WORKTREE_ROOT` to enable optional per-thread git worktrees.
-Each thread id is mapped to a root-confined, collision-resistant label. If the
-worktree already exists, it is reused. If setup fails, the adapter logs the
-failure and keeps the original cwd so the app-server session can continue.
+Per-thread git worktrees are off by default. Set `CLAUDE_CODEX_AUTO_WORKTREE=1`
+in the adapter's environment to turn them on; `CLAUDE_CODEX_WORKTREE_ROOT` only
+chooses where they go (default `worktrees` in the adapter home). Setting the
+root alone does not enable isolation. Each newly started or forked thread whose
+cwd is inside a git repository gets a worktree on a new `claude-codex/<label>`
+branch created from that repository's `HEAD`. Each thread id is mapped to a
+root-confined, collision-resistant label. If the worktree already exists, it is
+reused. If setup fails, the adapter logs the failure and keeps the original cwd
+so the app-server session can continue. See
+[Worktree isolation](/guide/configuration#worktree-isolation) in the
+configuration guide.
 
-This feature isolates concurrent coding agents without making worktree creation
-a hard dependency for normal Codex App operation.
+This feature isolates concurrent coding agents when it is enabled, without
+making worktree creation a hard dependency for normal Codex App operation.
 
 ## GitHub trust boundary
 
@@ -107,6 +124,15 @@ The ingestion command creates explicit workflow tasks from trusted metadata
 only: item number, title, state, URL, and item kind. Body text, comments,
 reviews, and other external instructions are intentionally omitted from the
 generated task prompt.
+
+Ingestion inserts each stable task ID only once. IDs already in the queue,
+including repeated entries in one export, are reported in `existing` and keep
+their saved status, attempts, lease, prompt, settings, errors, and blocked reason.
+`enqueued` and `taskIds` describe only newly inserted tasks. Use explicit
+`enqueue --id` to intentionally replace a task instead.
+A `gh issue list` export and a GitHub REST export of the same ordinary issue
+(github.com, GHE.com or GitHub Enterprise Server) share one task ID, so a task
+saved under either ID is reported in `existing`.
 
 Before changing code for a GitHub-sourced task, inspect external text through
 the project trust-boundary workflow and keep the execution step explicit in the
