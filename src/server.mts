@@ -8017,10 +8017,10 @@ export class CodexClaudeAppServer {
     signal?: AbortSignal,
   ): Promise<UserInputAnswers> {
     const requestId = newId()
-    // Always guarantee an "Other" affordance so the App's free-text fallback
-    // is available, even when the upstream caller (Claude tool input, mock
-    // runtime, etc.) didn't model it explicitly.
+    // Questions with isOther already get the App's own free-text choice; for
+    // callers that don't set it, fall back to a plain "Other" option.
     const normalized = questions.map((q) => {
+      if (q.isOther) return q
       const options = q.options ?? []
       const hasOther = options.some((o) => o.label === 'Other')
       return hasOther
