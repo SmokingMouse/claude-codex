@@ -1189,7 +1189,11 @@ export class CodexClaudeAppServer {
       case 'plugin/install':
         return this.pluginInstall(asRecord(params))
       case 'skills/config/write':
-        return { effectiveEnabled: asRecord(params).enabled === true }
+        // App rule: settings-write-errors
+        if (asRecord(params).enabled === false) {
+          throw invalidRequest('Disabling skills is not supported for Claude threads.')
+        }
+        return { effectiveEnabled: true }
       case 'plugin/share/list':
         return { data: [] }
       // Stub the three RPC methods Codex App may call that our dispatcher
@@ -3130,12 +3134,12 @@ export class CodexClaudeAppServer {
     debugLog('thread.revert', { threadId, beforeTurnId, dropped })
     const kept = this.store.historyTurns(threadId)
     const last = kept.at(-1)
-    const lastItem = last?.items.at(-1)
+    const itemCount = kept.reduce((count, turn) => count + turn.items.length, 0)
     this.notify(peer, { method: 'thread/reverted', params: { threadId } })
     return {
       thread: this.toThread(this.store.getThread(threadId) ?? thread, []),
       turnsBackwardsCursor: last ? last.id : null,
-      itemsBackwardsCursor: lastItem ? lastItem.id : null,
+      itemsBackwardsCursor: itemCount > 0 ? String(itemCount - 1) : null,
     }
   }
 
@@ -5764,16 +5768,18 @@ export class CodexClaudeAppServer {
             const output = exploreItemIds.has(itemId) ? capOutput(resultText) : resultText
             const updated = this.store.updateItem(turn.id, itemId, (item) => {
               if (item.type === 'commandExecution') {
+                // A shell exit notification adds a summary to the output already
+                // shown. A regular tool result may replace a partial stream.
+                const shellExitCode = event.commandExitCode
+                let aggregatedOutput = item.aggregatedOutput ?? output
+                if (shellExitCode !== undefined && output)
+                  aggregatedOutput = appendCommandOutput(item.aggregatedOutput, `\n${output}`)
+                else if (commandOutputSeen.has(itemId) && output) aggregatedOutput = output
                 return {
                   ...item,
                   status: event.isError ? 'failed' : 'completed',
-                  // The result has all of the output, where what streamed in
-                  // may have skipped some.
-                  aggregatedOutput:
-                    commandOutputSeen.has(itemId) && output
-                      ? output
-                      : (item.aggregatedOutput ?? output),
-                  exitCode: parsedExitCode,
+                  aggregatedOutput,
+                  exitCode: shellExitCode === undefined ? parsedExitCode : shellExitCode,
                   durationMs,
                 }
               }
