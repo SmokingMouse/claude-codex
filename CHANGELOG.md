@@ -141,6 +141,22 @@ versioning or publishing metadata.
 
 ### App-server and protocol compatibility
 
+- `fs/watch` follows Codex: it keeps the path the client sent instead of its
+  realpath, watches a file (such as `.git/HEAD`) through its directory so the
+  watch survives git's lock-file rename and reports the file's own path, accepts
+  a file that does not exist yet, coalesces each watch's events over 200 ms,
+  and refuses a `watchId` already in use on the same connection with
+  `watchId already exists: <id>`. Watch ids are per connection, and a closed
+  connection's watches are dropped.
+- A `command/exec` that hits `timeoutMs` now stops its whole process group
+  (SIGTERM, then SIGKILL after 1 s) and reports `exitCode` 124. The reply comes
+  when the command exits plus at most a 2 s output drain, so a backgrounded
+  child no longer holds it. `command/exec/terminate` stops the group too.
+- Streamed `command/exec` output (`streamStdoutStderr` or `tty`) now honors
+  `outputBytesCap`, including its 1,000,000-byte default, as Codex does: each
+  stream is cut at the cap, the delta that reaches it carries `capReached:
+  true`, and later data on that stream is dropped while the process keeps
+  running. `disableOutputCap` keeps streaming everything.
 - Opt-in Memories: with `CLAUDE_CODEX_MEMORIES=1`, the App's Memories
   settings (Settings > Personalization) and `/memories` decide whether Claude
   threads run with Claude Code's auto-memory, and while Memories is off in the
