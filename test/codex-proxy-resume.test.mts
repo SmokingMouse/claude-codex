@@ -94,7 +94,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         assert.deepEqual(call.args, [
           ...shared,
           ...(index === 1 ? ['resume', 'session-id'] : []),
-          context.prompt,
+          '-',
         ])
       }
     }
