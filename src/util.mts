@@ -84,8 +84,8 @@ export function defaultSocketPath(): string {
   return join(tmpdir(), `ccx-${stableHash(preferred).slice(0, 16)}.sock`)
 }
 
-// The folders a cwd's sessions may be in under a Claude Code config dir's
-// projects: named after the cwd, and after its real path when that differs.
+// Claude Code's signed 31-hash of a path's UTF-16 units in base 36: the
+// suffix the CLI appends to a project folder name it cuts at 200 characters.
 function pathHash(path: string): string {
   let hash = 0
   for (let index = 0; index < path.length; index++)
@@ -98,6 +98,11 @@ function projectSlugFor(dir: string): string {
   return slug.length <= 200 ? slug : `${slug.slice(0, 200)}-${pathHash(dir)}`
 }
 
+// The folders a cwd's sessions may be in under a Claude Code config dir's
+// projects: named after the cwd, and after its real path when that differs.
+// The CLI's names (the first 200 characters plus `-` and the path hash) come
+// first, then the legacy uncut names older CLIs used, when they fit in a
+// 255-character directory entry.
 export function projectSlugs(cwd: string): string[] {
   const directories = [cwd]
   try {

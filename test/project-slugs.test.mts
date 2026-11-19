@@ -13,6 +13,9 @@ test('project slugs follow the 200 UTF-16 unit boundary and signed path hash', (
     '-' + 'a'.repeat(200),
   ])
   assert.equal(projectSlugs('/' + 'a'.repeat(201))[0], '-' + 'a'.repeat(199) + '-85qkr6')
+  // A legacy uncut slug is kept only while it fits in a 255-character directory entry.
+  assert.equal(projectSlugs('/' + 'a'.repeat(254)).length, 2)
+  assert.equal(projectSlugs('/' + 'a'.repeat(255)).length, 1)
   assert.equal(projectSlugs('/' + 'a'.repeat(198) + '😀')[0], '-' + 'a'.repeat(198) + '--b5wpam')
 })
 
