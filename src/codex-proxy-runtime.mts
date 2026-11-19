@@ -6,13 +6,14 @@
 //
 // Multi-turn continuity: Codex's `thread.started.thread_id` returned on the
 // first turn is persisted on our ThreadRecord.codexSessionId; subsequent
-// turns invoke `codex exec resume <id>` so the conversation history survives.
+// turns invoke `codex exec <options> resume <id>` so the conversation history survives.
 //
 // Auth: relies on real Codex's own auth state (login via the Codex desktop
 // app or `codex login`). We don't manage tokens for it — just forward what
 // the OS user has.
 
 import { type ChildProcess, spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { createInterface, type Interface } from 'node:readline'
 import { flatPrompt } from './turn-context.mjs'
 import type { ClaudeRuntime, RuntimeHandlers, RuntimeTurnContext } from './types.mjs'
@@ -67,11 +68,15 @@ export class CodexProxyRuntime implements ClaudeRuntime {
       //                                approvalPolicy/sandboxMode; codex
       //                                would otherwise prompt on stdin and
       //                                deadlock the JSONL stream.
+      //   -s <mode>                    read-only / workspace-write sandbox (any other mode takes
+      //                                the bypass flag)
       //   -m <model>                   the model the user picked in the App
       //   -C <cwd>                     anchor the workspace
-      //   resume <sessionId>           multi-turn continuity
+      //   --add-dir <dir>              extra writable roots (CLAUDE_CODEX_ADD_DIRS)
+      //   resume <sessionId>           multi-turn continuity; goes after all the options above,
+      //                                since `codex exec resume` takes no -C, -s or --add-dir
+      //                                of its own
       const resumeId = context.claudeSessionId
-      // Shared exec options must precede the resume subcommand too.
       const args: string[] = ['exec', '--json', '--skip-git-repo-check']
       if (context.sandboxMode === 'read-only' || context.sandboxMode === 'workspace-write') {
         args.push('-s', context.sandboxMode)
@@ -160,6 +165,12 @@ export class CodexProxyRuntime implements ClaudeRuntime {
         if (pending.resolved) return
         pending.resolved = true
         this.turns.delete(context.turnId)
+        // spawn() reports a missing cwd as ENOENT on the codex binary itself.
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'ENOENT' && context.cwd && !existsSync(context.cwd)) {
+          reject(new Error(`Project folder not found: ${context.cwd}`))
+          return
+        }
         reject(err)
       })
     })

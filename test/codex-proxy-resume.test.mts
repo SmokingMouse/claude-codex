@@ -98,6 +98,13 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         ])
       }
     }
+    await assert.rejects(
+      runtime.runTurn(
+        { ...context, turnId: 'turn-missing', cwd: join(directory, 'missing') },
+        { onEvent: () => {}, onPermissionRequest: async () => ({ decision: 'decline' as const }) },
+      ),
+      /Project folder not found/,
+    )
   } finally {
     await runtime.stop()
     if (oldBinary === undefined) delete process.env.CODEX_REAL
