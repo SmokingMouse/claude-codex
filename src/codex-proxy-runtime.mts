@@ -301,12 +301,12 @@ export class CodexProxyRuntime implements ClaudeRuntime {
           if (itemType === 'command_execution') {
             const exitCode = typeof item.exit_code === 'number' ? item.exit_code : null
             isError ||= exitCode !== null && exitCode !== 0
-            // Preserve the authoritative exit status for the server's Bash result parser.
-            if (
-              exitCode !== null &&
-              !/(?:^|\n)(?:Exit code|exit status):?\s*-?\d+\s*$/i.test(content ?? '')
-            ) {
-              content = `${content ? `${content}\n` : ''}Exit code: ${exitCode}`
+            // A failed command's exit status goes last, for the server's Bash result
+            // parser; a successful command's output stays as the command printed it.
+            if (exitCode !== null && exitCode !== 0) {
+              const output = content ?? ''
+              const separator = output && !output.endsWith('\n') ? '\n' : ''
+              content = `${output}${separator}Exit code: ${exitCode}`
             }
           } else if (itemType === 'mcp_tool_call') {
             const result = asRecord(item.result)

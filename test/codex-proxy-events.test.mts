@@ -41,8 +41,20 @@ test('codex command failures preserve status and exit code', async () => {
     assert.equal(event.toolUseId, 'item_1')
     assert.equal(event.isError, isError)
     assert.match(String(event.content), /command output/)
-    if (exitCode !== null) assert.equal(parseExitCodeFromResult(event.content), exitCode)
+    if (exitCode === 0) assert.equal(event.content, 'command output')
+    else if (exitCode !== null) assert.equal(parseExitCodeFromResult(event.content), exitCode)
   }
+  const goStyle = await mapped('item.completed', {
+    type: 'command_execution',
+    command: 'go test ./...',
+    aggregated_output: 'FAIL\nexit status 1\n',
+    exit_code: 2,
+    status: 'failed',
+  })
+  assert.equal(goStyle.type, 'tool_result')
+  if (goStyle.type !== 'tool_result') return
+  assert.equal(goStyle.content, 'FAIL\nexit status 1\nExit code: 2')
+  assert.equal(parseExitCodeFromResult(goStyle.content), 2)
 })
 
 test('codex file changes use nested paths and propagate failed status', async () => {
