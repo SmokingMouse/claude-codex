@@ -16,17 +16,34 @@ function summary(method: string, params: unknown) {
 
 test('debug summaries omit steer inputs, diffs and injected items', () => {
   assert.deepEqual(
-    summary('turn/steer', { threadId: 't', input: [{ type: 'text', text: secret }] }),
-    { threadId: 't', inputTypes: ['text'] },
+    summary('turn/steer', {
+      threadId: 't',
+      expectedTurnId: 'u',
+      input: [{ type: 'text', text: secret }],
+    }),
+    { threadId: 't', expectedTurnId: 'u', inputTypes: ['text'] },
   )
-  assert.deepEqual(summary('turn/diff/updated', { threadId: 't', diff: secret }), {
+  assert.deepEqual(summary('turn/diff/updated', { threadId: 't', turnId: 'u', diff: secret }), {
     threadId: 't',
+    turnId: 'u',
     diffBytes: bytes,
   })
   assert.deepEqual(summary('thread/inject_items', { threadId: 't', items: [{ text: secret }] }), {
     threadId: 't',
     itemCount: 1,
   })
+})
+
+test('debug file change summaries keep paths and byte counts only', () => {
+  assert.deepEqual(
+    summary('item/fileChange/patchUpdated', {
+      threadId: 't',
+      turnId: 'u',
+      itemId: 'i',
+      changes: [{ path: '/x/.env', kind: { type: 'add' }, diff: secret }],
+    }),
+    { threadId: 't', turnId: 'u', itemId: 'i', paths: ['/x/.env'], diffBytes: bytes },
+  )
 })
 
 for (const method of ['process/writeStdin', 'command/exec/write']) {
@@ -101,10 +118,12 @@ test('outputDelta retains its byte summary ahead of generic delta handling', () 
 test('missing content produces empty metadata', () => {
   assert.deepEqual(summarizeRpcParams('turn/steer', null), {
     threadId: undefined,
+    expectedTurnId: undefined,
     inputTypes: [],
   })
   assert.deepEqual(summarizeRpcParams('turn/diff/updated', {}), {
     threadId: undefined,
+    turnId: undefined,
     diffBytes: 0,
   })
   assert.deepEqual(summarizeRpcParams('thread/inject_items', {}), {

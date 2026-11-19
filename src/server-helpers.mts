@@ -328,13 +328,29 @@ export function summarizeRpcParams(method: string, params: unknown): unknown {
   if (method === 'turn/steer') {
     return {
       threadId: rec.threadId,
+      expectedTurnId: rec.expectedTurnId,
       inputTypes: Array.isArray(rec.input) ? rec.input.map((item) => asRecord(item).type) : [],
     }
   }
   if (method === 'turn/diff/updated') {
     return {
       threadId: rec.threadId,
+      turnId: rec.turnId,
       diffBytes: typeof rec.diff === 'string' ? Buffer.byteLength(rec.diff, 'utf8') : 0,
+    }
+  }
+  if (method === 'item/fileChange/patchUpdated') {
+    const changes = Array.isArray(rec.changes) ? rec.changes.map((change) => asRecord(change)) : []
+    return {
+      threadId: rec.threadId,
+      turnId: rec.turnId,
+      itemId: rec.itemId,
+      paths: changes.map((change) => change.path),
+      diffBytes: changes.reduce<number>(
+        (total, change) =>
+          total + (typeof change.diff === 'string' ? Buffer.byteLength(change.diff, 'utf8') : 0),
+        0,
+      ),
     }
   }
   if (method === 'process/writeStdin' || method === 'command/exec/write') {
