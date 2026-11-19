@@ -160,6 +160,11 @@ versioning or publishing metadata.
 - The goal tools (`codex_goal`) and leader tools (`codex_leader`) load with the
   session instead of behind Claude Code's tool search, so Claude knows they are
   there in a session with many tools.
+- `claude-codex-mode` force-kills (SIGKILL) a pooled bridge or an app-server
+  that is still running 3 seconds after SIGTERM. It used to send SIGTERM a
+  second time, then drop the bridge's pidfile anyway, which left a bridge
+  holding its port that `status`, `stop-bridges` and `prune-bridges` could no
+  longer see, and `set` reported the app-server stopped while it still ran.
 - An unexpected error the adapter does not catch now ends it with exit code 1
   and the stack on stderr, logged once in `debug.jsonl`, so whatever started
   it can start it again. The adapter used to log and re-throw the same error
