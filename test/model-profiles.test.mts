@@ -1464,6 +1464,7 @@ test('profile env files strip comments while preserving quoted content and URL f
     HASH: '#literal',
     QUOTED: ' inside # value ',
     ADJACENT: 'value',
+    NOREF: 'v',
   }
   try {
     await writeFile(
@@ -1478,6 +1479,7 @@ test('profile env files strip comments while preserving quoted content and URL f
         'HASH=#literal',
         'QUOTED=" inside # value " # comment',
         "ADJACENT='value'# comment",
+        'NOREF=v # ${MISSING_VAR}',
         '',
       ].join('\n'),
       { mode: 0o600 },
@@ -1491,6 +1493,7 @@ test('profile env files strip comments while preserving quoted content and URL f
       Object.entries(expected)
         .map(([key, value]) => `${key}='${value}'`)
         .join('\n'),
+      { mode: 0o600 },
     )
     assert.equal(modelProfileFingerprint('main-model', env), fingerprint)
   } finally {
@@ -1506,7 +1509,13 @@ test('profile env files reject unterminated quotes and text after closing quotes
     CLAUDE_CODEX_MODEL_PROFILES: JSON.stringify([{ id: 'main-model', envFile }]),
   }
   try {
-    for (const value of ['"unterminated', "'unterminated", '"value"suffix', "'value' trailing"]) {
+    for (const value of [
+      '"unterminated',
+      "'unterminated",
+      '"value"suffix',
+      "'value' trailing",
+      '"a\\"b"',
+    ]) {
       await writeFile(envFile, `# first line\nLINK=${value}\n`, { mode: 0o600 })
       assert.throws(() => resolveClaudeModelProcess('main-model', env), {
         message: `invalid env assignment at ${envFile}:2`,
