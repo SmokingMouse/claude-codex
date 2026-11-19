@@ -13631,7 +13631,9 @@ test('thread sections paginate without losing entries at page boundaries', async
   }
 })
 
-test('TTY process/spawn drains output and reports child exit status without process/kill', async () => {
+test('TTY process/spawn drains output and reports child exit status without process/kill', {
+  timeout: 20_000,
+}, async () => {
   const home = await mkdtemp(join(tmpdir(), 'claude-codex-pty-exit-'))
   const proc = spawnMockAdapter(home)
   const reader = new JsonLineReader(proc)
@@ -13669,6 +13671,63 @@ test('TTY process/spawn drains output and reports child exit status without proc
         .join('')
       assert.equal(output, scenario.output)
     }
+  } finally {
+    proc.kill()
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 })
+  }
+})
+
+test('TTY process/spawn closeStdin stops a same-group descendant that outlives the leader', {
+  timeout: 20_000,
+}, async () => {
+  const home = await mkdtemp(join(tmpdir(), 'claude-codex-pty-close-'))
+  const proc = spawnMockAdapter(home)
+  const reader = new JsonLineReader(proc)
+  try {
+    const processHandle = 'tty-close'
+    const script = [
+      'import os, signal, time',
+      'signal.signal(signal.SIGHUP, signal.SIG_IGN)',
+      'leader = os.getpid()',
+      'if os.fork() == 0:',
+      '    while os.getppid() == leader:',
+      '        time.sleep(0.02)',
+      "    os.write(1, b'orphaned')",
+      '    time.sleep(30)',
+      '    os._exit(0)',
+      'os._exit(3)',
+    ].join('\n')
+    proc.stdin.write(
+      json({
+        id: 1,
+        method: 'process/spawn',
+        params: {
+          processHandle,
+          command: ['python3', '-c', script],
+          tty: true,
+          streamStdoutStderr: false,
+        },
+      }),
+    )
+    await reader.nextResponse(1)
+    await readUntil(
+      reader,
+      (message) =>
+        message.method === 'process/outputDelta' &&
+        message.params.processHandle === processHandle &&
+        Buffer.from(message.params.deltaBase64, 'base64').toString('utf8').includes('orphaned'),
+    )
+    const started = Date.now()
+    proc.stdin.write(
+      json({ id: 2, method: 'process/writeStdin', params: { processHandle, closeStdin: true } }),
+    )
+    const messages = await readUntil(
+      reader,
+      (message) =>
+        message.method === 'process/exited' && message.params.processHandle === processHandle,
+    )
+    assert.equal(messages.at(-1)?.params.exitCode, 3)
+    assert.ok(Date.now() - started < 5_000)
   } finally {
     proc.kill()
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 })

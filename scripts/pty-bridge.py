@@ -35,16 +35,14 @@ def reap_status(pid, wait=True):
         time.sleep(0.01)
 
 def cleanup_child(pid):
-    code = reap_status(pid, wait=False)
-    if code is not None:
-        return code
     try:
         os.killpg(pid, signal.SIGTERM)
     except Exception:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
+        if reap_status(pid, wait=False) is None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
     for _ in range(10):
         code = reap_status(pid, wait=False)
         if code is not None:
@@ -124,8 +122,9 @@ def main():
 
     finally:
         code = cleanup_child(pid)
-        t.join()
-        sys.exit(code)
+        # Drain remaining output, but never hang on a slave held outside the process group.
+        t.join(timeout=1.0)
+        os._exit(code)
 
 if __name__ == "__main__":
     main()
