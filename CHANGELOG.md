@@ -131,6 +131,12 @@ versioning or publishing metadata.
 
 ### App-server and protocol compatibility
 
+- Untracked symlinks show in the turn diff as `new file mode 120000` entries
+  whose content is the link target, as `git diff` shows them. The adapter no
+  longer reads through a link, so a file outside the workspace no longer leaks
+  into the diff and a link to a device such as `/dev/zero` no longer hangs it;
+  a dangling or directory link, an embedded repository or an unreadable file
+  no longer empties the untracked part of the diff.
 - Opt-in Memories: with `CLAUDE_CODEX_MEMORIES=1`, the App's Memories
   settings (Settings > Personalization) and `/memories` decide whether Claude
   threads run with Claude Code's auto-memory, and while Memories is off in the

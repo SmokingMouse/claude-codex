@@ -1556,6 +1556,9 @@ export async function gitUntrackedDiff(cwd: string): Promise<string> {
 
 export function addedFileDiff(path: string, text: string, mode = '100644'): string {
   const lines = text.length === 0 ? [] : text.replace(/\n$/, '').split('\n')
+  // A link target never ends in a newline; git marks that so `git apply` keeps the link intact.
+  const noNewline =
+    mode === '120000' && text !== '' && !text.endsWith('\n') ? ['\\ No newline at end of file'] : []
   return [
     `diff --git a/${path} b/${path}`,
     `new file mode ${mode}`,
@@ -1564,6 +1567,7 @@ export function addedFileDiff(path: string, text: string, mode = '100644'): stri
     `+++ b/${path}`,
     `@@ -0,0 +1,${lines.length} @@`,
     ...lines.map((line) => `+${line}`),
+    ...noNewline,
     '',
   ].join('\n')
 }

@@ -48,5 +48,8 @@ test('untracked symlinks retain link targets without reading them or hiding new 
 test('addedFileDiff defaults to regular file mode and accepts symlink mode', () => {
   assert.match(addedFileDiff('new.txt', 'text'), /new file mode 100644\n/)
   assert.match(addedFileDiff('link', '../target', '120000'), /new file mode 120000\n/)
-  assert.match(addedFileDiff('link', '../target', '120000'), /\+\.\.\/target\n$/)
+  assert.match(
+    addedFileDiff('link', '../target', '120000'),
+    /\+\.\.\/target\n\\ No newline at end of file\n$/,
+  )
 })
