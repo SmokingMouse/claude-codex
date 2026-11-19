@@ -4037,8 +4037,9 @@ export class CodexClaudeAppServer {
     // A turn/start can race a turn the adapter has just opened itself (for a
     // background agent's or workflow's report); a second turn would orphan
     // it, and it would never complete.
-    if (resumed) {
-      // Pressed while a turn runs: that turn is already carrying on.
+    if (resumed || hiddenPrompt != null) {
+      // Pressed while a turn runs, or a goal continuation that waited on a
+      // turn start: that turn is already carrying on.
       const runningTurnId = this.activeTurnByThread.get(threadId)
       const running = runningTurnId ? this.store.getTurn(runningTurnId) : null
       if (running?.status === 'inProgress') return { turn: this.toLifecycleTurn(running) }

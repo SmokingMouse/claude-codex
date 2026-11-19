@@ -333,3 +333,48 @@ for (const [method, message] of [
     })
   })
 }
+
+test('a goal continuation that waits on a starting turn joins it', async () => {
+  let releaseFirst!: () => void
+  const firstHeld = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  let firstEnded: Promise<unknown> | null = null
+  let runs = 0
+  let live = 0
+  let maxLive = 0
+  const runtime = scriptedRuntime(
+    async (_context, handlers) => {
+      const run = ++runs
+      maxLive = Math.max(maxLive, ++live)
+      await (run === 1 ? firstHeld : new Promise((resolve) => setTimeout(resolve, 50)))
+      live--
+      await handlers.onEvent({ type: 'text_delta', delta: `answer ${run}` })
+      await handlers.onEvent({ type: 'completed', success: true, result: `answer ${run}` })
+    },
+    {
+      // The input waits on the first turn until that turn has ended and the
+      // goal's next turn is due.
+      steer: async (_threadId, _prompt, options) => {
+        if (!firstEnded) {
+          options?.onAccepted?.()
+          return true
+        }
+        releaseFirst()
+        await firstEnded
+        await new Promise((resolve) => setImmediate(resolve))
+        return false
+      },
+    },
+  )
+  await withInProcessApp(runtime, async (app) => {
+    const threadId = await app.startThread()
+    const first = await app.startTurn(threadId, 'first input')
+    await app.request('thread/goal/set', { threadId, objective: 'keep going', status: 'active' })
+    firstEnded = app.turnCompleted(first)
+    const turnId = await app.startTurn(threadId, 'second input')
+    await app.turnCompleted(turnId)
+    assert.equal(maxLive, 1)
+    assert.ok(app.store.getTurn(turnId)?.items.some((item) => item.type === 'agentMessage'))
+  })
+})
