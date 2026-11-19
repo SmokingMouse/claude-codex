@@ -160,6 +160,18 @@ versioning or publishing metadata.
 - The goal tools (`codex_goal`) and leader tools (`codex_leader`) load with the
   session instead of behind Claude Code's tool search, so Claude knows they are
   there in a session with many tools.
+- `claude-codex-mode` force-kills (SIGKILL) a pooled bridge or an app-server
+  that is still running 3 seconds after SIGTERM. It used to send SIGTERM a
+  second time, then drop the bridge's pidfile anyway, which left a bridge
+  holding its port that `status`, `stop-bridges` and `prune-bridges` could no
+  longer see, and `set` reported the app-server stopped while it still ran.
+- An unexpected error the adapter does not catch now ends it with exit code 1
+  and the stack on stderr, logged once in `debug.jsonl`, so whatever started
+  it can start it again. The adapter used to log and re-throw the same error
+  forever, so it kept running in whatever state the error left it in, busy
+  writing thousands of `adapter.uncaughtException` lines a second to
+  `debug.jsonl`. Errors from a peer that went away (`EPIPE`, `ECONNRESET`,
+  `EBADF`) are still logged and ignored.
 
 ### App-server and protocol compatibility
 
@@ -169,6 +181,11 @@ versioning or publishing metadata.
   into the diff and a link to a device such as `/dev/zero` no longer hangs it;
   a dangling or directory link, an embedded repository or an unreadable file
   no longer empties the untracked part of the diff.
+- With the `codex` shim on `PATH`, `codex app-server generate-ts` and
+  `generate-json-schema` (and so `npm run generate:schema`) go to the real
+  Codex CLI (`CODEX_REAL`). They used to start an adapter app-server on stdio
+  that never wrote the bindings; without a real codex the shim now exits 127
+  and says to set `CODEX_REAL`.
 - `thread/list` now filters by `searchTerm` (thread name or preview) and
   `excludedThreadIds`, and the exclusion applies before the page limit. A
   malformed or oversized (more than 100) `excludedThreadIds` returns
@@ -794,6 +811,12 @@ versioning or publishing metadata.
 
 ### Provider and multi-agent boundaries
 
+- Follow-up turns of a Codex (`gpt-*`) chat on the `codex-proxy` route run
+  in the thread's folder with its sandbox mode and extra writable roots
+  (`CLAUDE_CODEX_ADD_DIRS`) again. `codex exec resume` was run without `-C`,
+  `-s` and `--add-dir`, so from the second turn on Codex worked in the
+  adapter's own folder, dropped the extra roots and, in `read-only` and
+  `workspace-write` chats, used the sandbox of the user's Codex config.
 - `/workflows` runs turn workflows on with the CLI's `CLAUDE_CODE_WORKFLOWS`
   switch instead of `--settings`, which pinned launchers reject, and respect a
   user's `enableWorkflows: false`.
