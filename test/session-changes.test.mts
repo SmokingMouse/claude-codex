@@ -858,3 +858,22 @@ test('CRLF files edited back to their original contents report no changes', asyn
     assert.equal(await changesOf(dirs, { S1: null }), `${lead()}\n\nNone.`)
   })
 })
+
+test("CRLF disk files undo a large file's recorded patch", async () => {
+  await withDirs(async (dirs) => {
+    const file = join(dirs.cwd, 'windows.bat')
+    await put(file, 'one\r\nTWO\r\nTHREE\r\nfour\r\n')
+    await put(
+      join(dirs.project, 'S1.jsonl'),
+      lines(
+        edit('t1', file, ['two\nthree', 'TWO\nTHREE'], 1, null, {
+          structuredPatch: [hunk(1, 4, 4, [' one', '-two', '-three', '+TWO', '+THREE', ' four'])],
+        }),
+      ),
+    )
+    const report = await changesOf(dirs, { S1: null })
+    assert.match(report, /\(\+2 -2\)/)
+    assert.match(report, /\n-two\n-three\n\+TWO\n\+THREE\n/)
+    assert.doesNotMatch(report, /\r/)
+  })
+})

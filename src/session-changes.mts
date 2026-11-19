@@ -448,6 +448,8 @@ async function fileReport(
       return { name, status: '?', summary: '(cannot be read)', diff: '' }
     now = null
   }
+  // Claude Code records a CRLF file's text, patches and edit strings with LF
+  // endings and writes the file back with CRLF: compare and diff both as LF.
   if (now?.includes('\r\n')) now = now.replaceAll('\r\n', '\n')
   let before = baseline(changes, now)
   if (before?.includes('\r\n')) before = before.replaceAll('\r\n', '\n')
