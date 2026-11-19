@@ -4683,10 +4683,10 @@ function keepTranscriptCopy(copy: Stats, source: Stats): boolean {
 
 // Parse the Claude SDK AskUserQuestionInput envelope into Codex's per-question
 // shape. Claude's input is `{questions: [{question, header, options:[{label,
-// description, preview?}], multiSelect}]}`. Codex's wire format separates the
-// "Other" / free-text path via the `isOther` flag — we synthesise an extra
-// option per question to mirror the harness behaviour (AskUserQuestion always
-// implicitly offers an Other choice).
+// description, preview?}], multiSelect}]}`. Codex's `isOther` flag makes the
+// client add its own free-text choice (the Codex TUI labels it "None of the
+// above" and returns the text as a `user_note: ` entry), so Claude's options
+// pass through unchanged.
 export function parseAskUserQuestions(input: Record<string, unknown>): UserInputQuestion[] {
   const raw = (input.questions as Array<Record<string, unknown>>) || []
   const out: UserInputQuestion[] = []
@@ -4734,7 +4734,7 @@ export function formatAskUserQuestionAnswers(
       continue
     }
     const entries = Array.isArray(slot.answers) ? slot.answers : []
-    const picked = entries.filter((s) => !s.startsWith('user_note: '))
+    const picked = entries.filter((s) => s && !s.startsWith('user_note: '))
     const notes =
       entries
         .filter((s) => s.startsWith('user_note: '))

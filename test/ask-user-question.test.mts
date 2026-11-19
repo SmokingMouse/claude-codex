@@ -32,6 +32,7 @@ for (const [label, selected, legacyNotes, expected, notes] of [
   ['annotation on selection', ['macOS', 'user_note: laptop'], undefined, 'macOS', 'laptop'],
   ['legacy notes', ['Other'], 'BSD', 'BSD', 'BSD'],
   ['prefer protocol note', ['Other', 'user_note: BSD'], 'old note', 'BSD', 'BSD'],
+  ['empty pick with note', ['', 'user_note: BSD'], undefined, 'BSD', 'BSD'],
 ] as const) {
   test(`AskUserQuestion preserves ${label} for Claude and the answer card`, () => {
     const answers = {
