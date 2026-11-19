@@ -76,3 +76,19 @@ test('fuzzy file search ranks deep basename matches beyond the first 100 walk hi
     )
   })
 })
+
+test('fuzzy file search keeps scores positive for deep directory-only matches', async () => {
+  const paths = [`${'packages/'.repeat(14)}core/index.ts`, 'src/core.ts']
+  await withRg(`process.stdout.write(${JSON.stringify(paths.join('\n'))})`, async (root) => {
+    await withInProcessApp(
+      scriptedRuntime(async () => {}),
+      async (app) => {
+        const result = await app.request('fuzzyFileSearch', { query: 'core', roots: [root] })
+        assert.equal(result.files.length, 2)
+        for (const file of result.files) {
+          assert.ok(Number.isInteger(file.score) && file.score >= 1, `score ${file.score}`)
+        }
+      },
+    )
+  })
+})

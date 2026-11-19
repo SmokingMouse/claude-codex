@@ -9449,7 +9449,7 @@ export class CodexClaudeAppServer {
               ? 800
               : name.includes(query)
                 ? 500 - name.indexOf(query)
-                : 100 - haystack.indexOf(query)
+                : Math.max(1, 100 - haystack.indexOf(query))
         files.push({
           root,
           path,
