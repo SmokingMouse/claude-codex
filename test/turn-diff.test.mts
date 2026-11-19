@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,6 +9,7 @@ import { gitDiff, gitUntrackedDiff } from '../src/server-helpers.mjs'
 
 const execFileAsync = promisify(execFile)
 const MiB = 1024 * 1024
+process.env.CLAUDE_CODEX_DEBUG_LOG = '0'
 
 async function withRepository(run: (cwd: string) => Promise<void>): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), 'turn-diff-'))
@@ -23,8 +24,12 @@ async function withRepository(run: (cwd: string) => Promise<void>): Promise<void
 test('oversized tracked diff retains large, small and untracked files', async () => {
   await withRepository(async (cwd) => {
     await writeFile(join(cwd, '00-large.txt'), `${'before'.repeat(170)}\n`.repeat(6_000))
+    const subdir = join(cwd, 'sub')
+    await mkdir(subdir)
+    await writeFile(join(subdir, 'literal[1].txt'), 'old\n')
     await writeFile(join(cwd, 'small.txt'), 'before\n')
-    await execFileAsync('git', ['add', '--', '00-large.txt', 'small.txt'], { cwd })
+    await execFileAsync('git', ['add', '--', '.'], { cwd })
+    await writeFile(join(subdir, 'literal[1].txt'), 'changed in subdir\n')
     await writeFile(join(cwd, '00-large.txt'), `${'after!'.repeat(170)}\n`.repeat(6_000))
     await writeFile(join(cwd, 'small.txt'), 'small change remains visible\n')
     await writeFile(join(cwd, 'new.txt'), 'untracked change remains visible\n')
@@ -42,15 +47,19 @@ test('oversized tracked diff retains large, small and untracked files', async ()
     assert.match(diff, /diff --git a\/new\.txt b\/new\.txt/)
     assert.match(diff, /\+untracked change remains visible/)
     assert.ok(Buffer.byteLength(diff) < MiB, 'large tracked content should be summarized')
+    const subdirDiff = await gitDiff(subdir)
+    assert.match(subdirDiff, /diff --git a\/00-large\.txt b\/00-large\.txt/)
+    assert.match(subdirDiff, /\+small change remains visible/)
+    assert.match(subdirDiff, /\+changed in subdir/)
   })
 })
 
 test('large untracked files have size stubs without inlining their contents', async () => {
   await withRepository(async (cwd) => {
-    await writeFile(join(cwd, 'artifact.log'), Buffer.alloc(10 * MiB, 'x'))
+    await writeFile(join(cwd, 'artifact.txt'), Buffer.alloc(10 * MiB, 'x'))
     await writeFile(join(cwd, 'small.txt'), 'visible new file\n')
     const diff = await gitDiff(cwd)
-    assert.match(diff, /diff --git a\/artifact\.log b\/artifact\.log/)
+    assert.match(diff, /diff --git a\/artifact\.txt b\/artifact\.txt/)
     assert.match(diff, /\[omitted: 10485760 bytes\]/)
     assert.match(diff, /\+visible new file/)
     assert.ok(Buffer.byteLength(diff) < 4096)
@@ -77,5 +86,18 @@ test('untracked inline budget preserves entries beyond fifty files', async () =>
       Buffer.byteLength(diff) < 2 * MiB + 64 * 1024,
       'only headers may exceed inline budget',
     )
+  })
+})
+
+test('a large untracked listing keeps a bounded number of entries with an omitted count', async () => {
+  await withRepository(async (cwd) => {
+    await Promise.all(
+      Array.from({ length: 300 }, (_, i) => writeFile(join(cwd, `entry-${i}.txt`), '')),
+    )
+    const diff = await gitUntrackedDiff(cwd)
+    const shown = (diff.match(/^diff --git /gm) ?? []).length
+    assert.ok(shown > 50 && shown < 300)
+    assert.ok(diff.endsWith(`[${300 - shown} more untracked files omitted]\n`))
+    assert.ok(Buffer.byteLength(diff) < 128 * 1024)
   })
 })

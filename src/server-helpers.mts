@@ -1,63 +1,42 @@
-import { type ChildProcess, execFile, spawn } from 'node:child_process'
-import { type FSWatcher, readFileSync, watch, writeFileSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
-import { promisify } from 'node:util'
+import { spawn } from 'node:child_process'
+import { isAbsolute } from 'node:path'
+import { createInterface } from 'node:readline'
 import type { ConfigEdit } from './app-settings.mjs'
 import type { AppSkill } from './claude-capabilities.mjs'
-import { callMcpTool, readMcpConfig, readMcpResource } from './mcp.mjs'
 import { stripQuietTurnHeartbeat } from './quiet-turns.mjs'
-import type { SessionStore } from './store.mjs'
 import { type AppToolNoteOptions, appToolAvailabilityNote } from './turn-context.mjs'
 import type {
   ApprovalsReviewer,
-  ClaudeRuntime,
   CollaborationModeKind,
   FileUpdateChange,
-  ImageInput,
-  JsonRpcId,
-  JsonRpcRequest,
-  JsonRpcResponse,
   PermissionDecision,
-  RpcPeer,
   RuntimeEvent,
   RuntimeFailure,
   ThreadItem,
   ThreadRecord,
-  ThreadTokenUsage,
   TokenUsageBreakdown,
   TurnRecord,
-  UserInput,
   UserInputAnswers,
   UserInputQuestion,
-  WireMessage,
 } from './types.mjs'
 import {
-  adapterHome,
   claudeModelOptions,
-  claudeOutputFormat,
-  codexCliVersion,
   codexHome,
   codexProxyModelOptions,
-  codexUserAgent,
   debugLog,
-  defaultAllowedTools,
-  ensureParent,
-  extractImageInputs,
-  isCodexOpenAiModel,
-  newId,
   normalizeCodexReasoningEffort,
-  nowMillis,
   nowSeconds,
-  platformFamily,
-  platformOs,
-  resolveClaudeEffort,
-  resolveClaudeModel,
   textFromInput,
   toolOutputInput,
 } from './util.mjs'
-import { maybeCreateThreadWorktree } from './worktree.mjs'
 
-const execFileAsync = promisify(execFile)
+export {
+  addedFileDiff,
+  gitDiff,
+  gitUntrackedDiff,
+  isGitWorkTree,
+  isNotAGitRepo,
+} from './turn-diff.mjs'
 
 export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -325,6 +304,64 @@ export function summarizeRpcParams(method: string, params: unknown): unknown {
       inputTypes: Array.isArray(rec.input) ? rec.input.map((item) => asRecord(item).type) : [],
     }
   }
+  if (method === 'turn/steer') {
+    return {
+      threadId: rec.threadId,
+      expectedTurnId: rec.expectedTurnId,
+      inputTypes: Array.isArray(rec.input) ? rec.input.map((item) => asRecord(item).type) : [],
+    }
+  }
+  if (method === 'turn/diff/updated') {
+    return {
+      threadId: rec.threadId,
+      turnId: rec.turnId,
+      diffBytes: typeof rec.diff === 'string' ? Buffer.byteLength(rec.diff, 'utf8') : 0,
+    }
+  }
+  if (method === 'item/fileChange/patchUpdated') {
+    const changes = Array.isArray(rec.changes) ? rec.changes.map((change) => asRecord(change)) : []
+    return {
+      threadId: rec.threadId,
+      turnId: rec.turnId,
+      itemId: rec.itemId,
+      paths: changes.map((change) => change.path),
+      diffBytes: changes.reduce<number>(
+        (total, change) =>
+          total + (typeof change.diff === 'string' ? Buffer.byteLength(change.diff, 'utf8') : 0),
+        0,
+      ),
+    }
+  }
+  if (method === 'process/writeStdin' || method === 'command/exec/write') {
+    return {
+      processHandle: rec.processHandle,
+      processId: rec.processId,
+      deltaBytes:
+        typeof rec.deltaBase64 === 'string'
+          ? Buffer.from(rec.deltaBase64, 'base64').byteLength
+          : typeof rec.delta === 'string'
+            ? Buffer.byteLength(rec.delta, 'utf8')
+            : 0,
+      closeStdin: rec.closeStdin,
+    }
+  }
+  if (method === 'fs/writeFile') {
+    return {
+      path: rec.path,
+      bytes:
+        typeof rec.dataBase64 === 'string'
+          ? Buffer.from(rec.dataBase64, 'base64').byteLength
+          : typeof rec.data === 'string'
+            ? Buffer.byteLength(rec.data, 'utf8')
+            : 0,
+    }
+  }
+  if (method === 'thread/inject_items') {
+    return {
+      threadId: rec.threadId,
+      itemCount: Array.isArray(rec.items) ? rec.items.length : 0,
+    }
+  }
   if (method === 'process/spawn' || method === 'command/exec') {
     return {
       processHandle: rec.processHandle,
@@ -352,7 +389,7 @@ export function summarizeRpcParams(method: string, params: unknown): unknown {
       capReached: rec.capReached,
     }
   }
-  if (method === 'item/agentMessage/delta') {
+  if (method.endsWith('/delta') || method.endsWith('Delta')) {
     return {
       threadId: rec.threadId,
       turnId: rec.turnId,
@@ -1215,11 +1252,6 @@ function unwrapSubagentHandback(text: string): string {
     .replace(/\s+$/, '')
 }
 
-// Best-effort parse of a Claude Bash tool_result for the real shell exit
-// code. Claude's tool result content is usually plain stdout/stderr, but in
-// some failure modes (and via custom wrappers / Codex CLI shims) the SDK
-// suffixes a `Exit code: N` / `exit status N` marker. Returning null lets
-// the caller fall back to 0/1 from event.isError.
 // Map Claude's TodoWrite input to Codex v2 TurnPlanStep[]. Claude todos carry
 // { content, status, activeForm } with status pending|in_progress|completed;
 // the wire TurnPlanStepStatus is camelCase pending|inProgress|completed.
@@ -1246,6 +1278,11 @@ export function todoWriteToPlanSteps(
   })
 }
 
+// Best-effort parse of a failed Claude Bash tool_result for the real shell
+// exit code. Claude Code starts a failed result with `Exit code N` (no colon)
+// followed by the command output; wrappers and the codex proxy may instead end
+// it with `Exit code: N` / `exit status: N`. Callers parse only error results
+// and fall back to 1 when this returns null.
 export function parseExitCodeFromResult(content: unknown): number | null {
   const text =
     typeof content === 'string'
@@ -1256,7 +1293,9 @@ export function parseExitCodeFromResult(content: unknown): number | null {
             .join('')
         : ''
   if (!text) return null
-  const match = text.match(/(?:Exit code|exit status|exit code):\s*(-?\d+)/i)
+  const match =
+    text.match(/^(?:Exit code|exit status):?[ \t]*(-?\d+)[ \t]*(?:\r?\n|$)/i) ??
+    text.match(/(?:^|\n)(?:Exit code|exit status):?[ \t]*(-?\d+)\s*$/i)
   if (!match) return null
   const code = Number(match[1])
   return Number.isFinite(code) ? code : null
@@ -1264,7 +1303,7 @@ export function parseExitCodeFromResult(content: unknown): number | null {
 
 // Maps the raw Anthropic usage block carried on the Claude Agent SDK
 // ResultMessage onto the Codex `TokenUsageBreakdown` shape. Cache-creation
-// tokens count as input; Claude does not separate reasoning output tokens.
+// tokens count as input. Other runtimes may also report reasoning output, a subset of output.
 export function tokenBreakdownFromClaudeUsage(usage: Record<string, unknown>): TokenUsageBreakdown {
   const num = (value: unknown): number =>
     typeof value === 'number' && Number.isFinite(value) ? value : 0
@@ -1272,11 +1311,12 @@ export function tokenBreakdownFromClaudeUsage(usage: Record<string, unknown>): T
   const cacheCreation = num(usage.cache_creation_input_tokens)
   const inputTokens = num(usage.input_tokens) + cacheCreation
   const outputTokens = num(usage.output_tokens)
+  const reasoningOutputTokens = num(usage.reasoning_output_tokens)
   return {
     inputTokens,
     cachedInputTokens: cacheRead,
     outputTokens,
-    reasoningOutputTokens: 0,
+    reasoningOutputTokens,
     totalTokens: inputTokens + cacheRead + outputTokens,
   }
 }
@@ -1433,235 +1473,95 @@ export function fileChangeFromTool(
   ]
 }
 
+function splitDiffLines(text: string): string[] {
+  if (!text) return []
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
 export function simpleDiff(path: string, oldText: string, newText: string): string {
   return [
     `--- a/${path}`,
     `+++ b/${path}`,
     '@@',
-    ...oldText
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => `-${line}`),
-    ...newText
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => `+${line}`),
+    ...splitDiffLines(oldText).map((line) => `-${line}`),
+    ...splitDiffLines(newText).map((line) => `+${line}`),
     '',
   ].join('\n')
 }
 
-// `git diff` failing is expected outside a repo, so we still return '' to keep
-// turns working — but the reason is written to the debug log instead of being
-// dropped silently, and a genuine git error is flagged as such.
-export function isNotAGitRepo(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /not a git repository/i.test(message)
-}
-
-// Cheap upfront check — if cwd isn't in a git work-tree, skip the expensive
-// `git diff` spawn entirely. Without this guard a non-git workspace (App
-// Remote pointing at $HOME or any arbitrary dir) was spamming debug.jsonl
-// with multi-KB "not a git repository" failures on every turn cycle, since
-// gitDiff runs from runRuntimeTurn after each tool result.
-const gitRepoCache = new Map<string, boolean>()
-export async function isGitWorkTree(cwd: string): Promise<boolean> {
-  if (gitRepoCache.has(cwd)) return gitRepoCache.get(cwd) as boolean
-  let inside = false
-  try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd,
-      timeout: 3_000,
-      maxBuffer: 1024,
-    })
-    inside = stdout.trim() === 'true'
-  } catch {
-    inside = false
-  }
-  gitRepoCache.set(cwd, inside)
-  return inside
-}
-
-const DIFF_FILE_BYTES = 256 * 1024
-const DIFF_INLINE_BYTES = 2 * 1024 * 1024
-
-function omittedFileDiff(path: string, reason: string, added = false): string {
-  return [
-    `diff --git a/${path} b/${path}`,
-    ...(added ? ['new file mode 100644', 'index 0000000..0000000'] : []),
-    added ? '--- /dev/null' : `--- a/${path}`,
-    `+++ b/${path}`,
-    '@@ -0,0 +1 @@',
-    `+[omitted: ${reason}]`,
-    '',
-  ].join('\n')
-}
-
-// A large patch must not erase smaller changes. Keep a header for every path
-// even after the content budget is spent. Disable renames for unambiguous -z records.
-async function trackedDiffFallback(cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync(
-    'git',
-    ['diff', '--no-ext-diff', '--no-renames', '--numstat', '-z', '--'],
-    {
-      cwd,
-      timeout: 10_000,
-      maxBuffer: 5 * 1024 * 1024,
-    },
-  )
-  const diffs: string[] = []
-  let remaining = DIFF_INLINE_BYTES
-  for (const record of stdout.split('\0').filter(Boolean)) {
-    const firstTab = record.indexOf('\t')
-    const secondTab = record.indexOf('\t', firstTab + 1)
-    if (secondTab < 0) continue
-    const path = record.slice(secondTab + 1)
-    let diff = omittedFileDiff(path, 'diff size limit')
-    if (remaining > 0) {
-      try {
-        const { stdout: patch } = await execFileAsync(
-          'git',
-          ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-renames', '--', path],
-          {
-            cwd,
-            timeout: 10_000,
-            maxBuffer: Math.min(DIFF_FILE_BYTES, remaining),
-          },
-        )
-        diff = patch
-        remaining -= Buffer.byteLength(patch)
-      } catch {
-        // Oversized or unreadable files still appear in the file list.
+// Stream the walk: large repositories can exceed execFile's output buffer.
+function streamFiles(
+  root: string,
+  command: string,
+  args: string[],
+  maxFiles: number,
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] })
+    const files: string[] = []
+    let capped = false
+    let timedOut = false
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, 10_000)
+    lines.on('line', (line) => {
+      if (capped || !line) return
+      files.push(line.replace(/^\.\//, ''))
+      if (files.length >= maxFiles) {
+        capped = true
+        lines.close()
+        child.kill('SIGKILL')
       }
-    }
-    diffs.push(diff)
-  }
-  return diffs.join('\n')
+    })
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      lines.close()
+      reject(error)
+    })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      lines.close()
+      if (timedOut) reject(new Error(`${command} file listing timed out`))
+      else if (capped || code === 0) resolve(files)
+      else reject(new Error(`${command} file listing exited with code ${code}`))
+    })
+  })
 }
 
-export async function gitDiff(cwd: string): Promise<string> {
-  if (!(await isGitWorkTree(cwd))) return ''
-  let trackedDiff = ''
+export async function listFiles(root: string, maxFiles = 250_000): Promise<string[]> {
+  if (maxFiles <= 0) return []
   try {
-    const { stdout } = await execFileAsync('git', ['diff', '--no-ext-diff', '--'], {
-      cwd,
-      timeout: 10_000,
-      maxBuffer: 5 * 1024 * 1024,
-    })
-    trackedDiff = stdout
-  } catch (error) {
-    debugLog('git.diff.failed', {
-      cwd,
-      reason: isNotAGitRepo(error) ? 'notAGitRepository' : 'error',
-      error: error instanceof Error ? error.message : String(error),
-    })
-    if ((error as NodeJS.ErrnoException)?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-      try {
-        trackedDiff = await trackedDiffFallback(cwd)
-      } catch (fallbackError) {
-        debugLog('git.diff.fallbackFailed', { cwd, error: String(fallbackError) })
-      }
-    }
-  }
-  const untrackedDiff = await gitUntrackedDiff(cwd)
-  return [trackedDiff, untrackedDiff].filter(Boolean).join('\n')
-}
-
-export async function gitUntrackedDiff(cwd: string): Promise<string> {
-  try {
-    const { lstat, open } = await import('node:fs/promises')
-    const { stdout } = await execFileAsync(
-      'git',
-      ['ls-files', '--others', '--exclude-standard', '-z'],
-      { cwd, timeout: 10_000, maxBuffer: 5 * 1024 * 1024 },
-    )
-    const paths = stdout.split('\0').filter(Boolean)
-    const diffs: string[] = []
-    let remaining = DIFF_INLINE_BYTES
-    for (const path of paths) {
-      try {
-        const info = await lstat(join(cwd, path))
-        let diff = omittedFileDiff(path, `${info.size} bytes`, true)
-        if (
-          info.isFile() &&
-          info.size <= DIFF_FILE_BYTES &&
-          info.size <= remaining &&
-          remaining > 0
-        ) {
-          // Bound the read too, in case a log grows between stat and open.
-          const file = await open(join(cwd, path), 'r')
-          const bytes = Buffer.alloc(DIFF_FILE_BYTES + 1)
-          let length = 0
-          try {
-            while (length < bytes.length) {
-              const { bytesRead } = await file.read(bytes, length, bytes.length - length, null)
-              if (!bytesRead) break
-              length += bytesRead
-            }
-          } finally {
-            await file.close()
-          }
-          const content = bytes.subarray(0, length)
-          if (length <= DIFF_FILE_BYTES && !content.includes(0)) {
-            const patch = addedFileDiff(path, content.toString('utf8'))
-            if (Buffer.byteLength(patch) <= remaining) {
-              diff = patch
-              remaining -= Buffer.byteLength(patch)
-            }
-          }
-        }
-        diffs.push(diff)
-      } catch {
-        diffs.push(omittedFileDiff(path, 'file unavailable', true))
-      }
-    }
-    return diffs.join('\n')
-  } catch (error) {
-    debugLog('git.untrackedDiff.failed', {
-      cwd,
-      reason: isNotAGitRepo(error) ? 'notAGitRepository' : 'error',
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return ''
-  }
-}
-
-export function addedFileDiff(path: string, text: string): string {
-  const lines = text.length === 0 ? [] : text.replace(/\n$/, '').split('\n')
-  return [
-    `diff --git a/${path} b/${path}`,
-    'new file mode 100644',
-    'index 0000000..0000000',
-    '--- /dev/null',
-    `+++ b/${path}`,
-    `@@ -0,0 +1,${lines.length} @@`,
-    ...lines.map((line) => `+${line}`),
-    '',
-  ].join('\n')
-}
-
-export async function listFiles(root: string): Promise<string[]> {
-  try {
-    const { stdout } = await execFileAsync('rg', ['--files'], {
-      cwd: root,
-      timeout: 10_000,
-      maxBuffer: 5 * 1024 * 1024,
-    })
-    return stdout.split('\n').filter(Boolean)
+    return await streamFiles(root, 'rg', ['--files'], maxFiles)
   } catch (rgError) {
     debugLog('listFiles.rgFailed', {
       root,
       error: rgError instanceof Error ? rgError.message : String(rgError),
     })
     try {
-      const { stdout } = await execFileAsync('find', ['.', '-type', 'f'], {
-        cwd: root,
-        timeout: 10_000,
-        maxBuffer: 5 * 1024 * 1024,
-      })
-      return stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((path) => path.replace(/^\.\//, ''))
+      return await streamFiles(
+        root,
+        'find',
+        [
+          '.',
+          '(',
+          '-name',
+          '.git',
+          '-o',
+          '-name',
+          'node_modules',
+          ')',
+          '-prune',
+          '-o',
+          '-type',
+          'f',
+          '-print',
+        ],
+        maxFiles,
+      )
     } catch (findError) {
       debugLog('listFiles.findFailed', {
         root,
@@ -1721,12 +1621,21 @@ export function userInputAnswersAsContent(
   const out: Array<{ type: 'inputText'; text: string }> = []
   for (const q of questions) {
     const slot = answers.answers[q.id]
-    const picked = slot?.answers?.filter((s) => s && s !== 'Other') ?? []
-    const notes = slot?.notes ?? null
-    const body =
-      notes && (picked.length === 0 || picked.includes('Other'))
-        ? notes
-        : picked.join(', ') || '(no answer)'
+    const entries = slot?.answers ?? []
+    const picked = entries.filter((s) => s && !s.startsWith('user_note: '))
+    const notes =
+      entries
+        .filter((s) => s.startsWith('user_note: '))
+        .map((s) => s.slice('user_note: '.length))
+        .join('\n') ||
+      slot?.notes ||
+      null
+    const custom =
+      notes &&
+      (picked.length === 0 || picked.includes('Other') || picked.includes('None of the above'))
+    const body = custom
+      ? [...picked.filter((s) => s !== 'Other' && s !== 'None of the above'), notes].join(', ')
+      : picked.join(', ') || '(no answer)'
     out.push({ type: 'inputText', text: `${q.header}: ${body}` })
   }
   return out
